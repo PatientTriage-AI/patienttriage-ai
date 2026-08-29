@@ -1,0 +1,25 @@
+{
+  "version": "policy-1.0.0-prototype",
+  "site_name": "Local demo site",
+  "adult_minimum_age": 18,
+  "required_fast_track_fields": ["age", "systolic_bp", "diastolic_bp", "heart_rate", "respiratory_rate", "temperature_c", "spo2", "pain_score"],
+  "plausible_ranges": {
+    "age": [0, 120], "systolic_bp": [50, 280], "diastolic_bp": [25, 180],
+    "heart_rate": [20, 260], "respiratory_rate": [4, 80], "temperature_c": [30, 44],
+    "spo2": [40, 100], "pain_score": [0, 10]
+  },
+  "nurse_selectable_red_flags": [
+    "airway_or_breathing_concern", "new_confusion_or_unresponsiveness", "active_seizure",
+    "uncontrolled_bleeding", "severe_chest_pain", "stroke_like_symptoms", "staff_immediate_concern"
+  ],
+  "rules_only_red_flag_vitals": {"spo2_at_or_below": 90, "systolic_bp_at_or_below": 90, "heart_rate_at_or_above": 140, "respiratory_rate_at_or_above": 30},
+  "low_confidence_threshold": 0.65,
+  "out_of_distribution_ranges": {"age": [18, 100], "systolic_bp": [75, 220], "heart_rate": [35, 180], "respiratory_rate": [8, 45], "temperature_c": [34, 42], "spo2": [75, 100], "pain_score": [0, 10]},
+  "reassessment_wait_minutes": {"1": 0, "2": 10, "3": 30, "4": 60, "5": 120},
+  "fast_track": {
+    "enabled": false,
+    "low_acuity_threshold": 0.85,
+    "validation_requirement": "Enable only after a held-out validation review shows zero urgent cases among Fast-Track passes and clinical governance approval.",
+    "disabled_reason": "Disabled in this prototype until validation and clinical governance approval are complete."
+  }
+}
