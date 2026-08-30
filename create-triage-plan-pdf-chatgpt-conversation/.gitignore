@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.streamlit/
+data/raw/
+data/processed/
+models/*.joblib
+models/*.pkl
+runtime/
+*.sqlite3
+.DS_Store
+.pytest_cache/
+.ruff_cache/

@@ -12,6 +12,7 @@ class TriageModel:
         self.base_model = None
         self.metadata = None
         self.features = []
+        self.load_error = None
         self._load_model()
         
     def _load_model(self):
@@ -22,7 +23,8 @@ class TriageModel:
             self.metadata = data["metadata"]
             self.features = self.metadata["features"]
         except Exception as e:
-            print(f"Failed to load model: {e}")
+            self.load_error = str(e)
+            print(f"Failed to load model: {self.load_error}")
             self.model = None
             
     def is_available(self) -> bool:
@@ -38,7 +40,10 @@ class TriageModel:
         # Prepare DataFrame
         row = {}
         for f in self.features:
-            val = inputs.get(f)
+            # The UI/domain calls this vital ``temperature`` while the training
+            # dataset uses ``temperature_c``. Keep inference aligned with the
+            # feature name used to train the artifact.
+            val = inputs.get("temperature") if f == "temperature_c" else inputs.get(f)
             row[f] = val
             row[f"{f}_missing"] = 1 if val is None or pd.isna(val) else 0
             if row[f"{f}_missing"] == 1:

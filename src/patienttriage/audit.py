@@ -91,14 +91,5 @@ class AuditTrail:
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM audit_events")
-            try:
-                conn.execute("DELETE FROM sqlite_sequence WHERE name='audit_events'")
-            except sqlite3.OperationalError:
-                pass  # sqlite_sequence may not exist if table was never populated
         # Reset in-memory chain head so the next recorded event is valid.
         self.last_hash = "GENESIS"
-
-    # Backward-compatible alias kept for any existing callers.
-    def clear_all(self) -> None:
-        """Alias for :meth:`clear_audit_trail` kept for backward compatibility."""
-        self.clear_audit_trail()
