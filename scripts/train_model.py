@@ -23,14 +23,19 @@ def add_features(frame):
 def score_report(y_true, probabilities, labels, latency_ms, frame):
     import numpy as np
     from sklearn.calibration import calibration_curve
-    from sklearn.metrics import confusion_matrix, precision_score, recall_score
+    from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
     predicted = np.asarray(labels)[probabilities.argmax(axis=1)]
     urgent_actual = y_true.isin([1, 2, 3])
     urgent_predicted = np.isin(predicted, [1, 2, 3])
     low_actual = y_true.isin([4, 5])
     low_predicted = np.isin(predicted, [4, 5])
+    esi_5_actual = y_true == 5
+    esi_5_predicted = predicted == 5
     report = {
+        "accuracy": float(accuracy_score(y_true, predicted)),
+        "macro_f1": float(f1_score(y_true, predicted, average="macro", zero_division=0)),
+        "esi_5_recall": float(recall_score(esi_5_actual, esi_5_predicted, zero_division=0)),
         "confusion_matrix": {"labels": [1, 2, 3, 4, 5], "values": confusion_matrix(y_true, predicted, labels=[1, 2, 3, 4, 5]).tolist()},
         "urgent_case_recall": float(recall_score(urgent_actual, urgent_predicted, zero_division=0)),
         "low_acuity_precision": float(precision_score(low_actual, low_predicted, zero_division=0)),

@@ -257,12 +257,16 @@ with tab5:
         if report_path.exists():
             with open(report_path) as f:
                 report = json.load(f)
+
+            def format_percent(metric_name):
+                value = report.get(metric_name)
+                return f"{value:.1%}" if isinstance(value, (int, float)) else "Not reported"
                 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Overall Accuracy", f"{report.get('accuracy', 0):.1%}")
-            col2.metric("Urgent Case Recall", f"{report.get('urgent_case_recall', 0):.1%}")
-            col3.metric("Low Acuity Precision", f"{report.get('low_acuity_precision', 0):.1%}")
-            col4.metric("ESI 5 Recall", f"{report.get('esi_5_recall', 0):.1%}")
+            col1.metric("Overall Accuracy", format_percent("accuracy"))
+            col2.metric("Urgent Case Recall", format_percent("urgent_case_recall"))
+            col3.metric("Low Acuity Precision", format_percent("low_acuity_precision"))
+            col4.metric("ESI 5 Recall", format_percent("esi_5_recall"))
             
             st.write(f"Fast-Track False Negatives: **{report.get('fast_track_false_negative_count')}**")
             st.write(f"Fast-Track Validation Status: **{report.get('fast_track_validation_status')}**")
