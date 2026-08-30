@@ -74,7 +74,10 @@ with st.sidebar:
         
     st.markdown("---")
     st.info(f"Policy: {policy_config.version()}")
-    st.info(f"Model: {service.model.metadata.get('model_version', 'None') if service.model.is_available() else 'None'}")
+    if service.model.is_available():
+        st.info(f"Model: {service.model.metadata.get('model_version', 'unknown')}")
+    else:
+        st.error("ML model unavailable. Run `python scripts/train_model.py --csv Data_preProcessing/fedmml_ed_triage_dataset.csv` to create `models/triage_calibrated.joblib`.")
 
 # --- TABS ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["New Arrival", "Batch Intake", "Waiting Queue", "Audit Trail", "Model Evaluation"])

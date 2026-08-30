@@ -63,11 +63,19 @@ def main() -> None:
     try:
         import joblib
         import pandas as pd
-        from lightgbm import LGBMClassifier
         from sklearn.calibration import CalibratedClassifierCV
         from sklearn.frozen import FrozenEstimator
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
     except ImportError as exc:
         raise SystemExit("Install project dependencies first: python -m pip install -e .") from exc
+    try:
+        from lightgbm import LGBMClassifier
+    except (ImportError, OSError) as exc:
+        LGBMClassifier = None
+        print(f"LightGBM unavailable ({exc}); using the portable LogisticRegression fallback.")
     # Preserve the source file untouched. These are explicit, documented source-to-model aliases.
     dataset = pd.read_csv(args.csv).rename(columns=SOURCE_COLUMN_ALIASES)
     required = set(FEATURES + [TARGET, "site"])
@@ -84,8 +92,18 @@ def main() -> None:
     if min(len(train), len(calibration), len(test)) == 0:
         raise SystemExit("Site split requires data from sites 1-4 (train), 5 (calibrate), and 6 (test).")
     weights = train[TARGET].map({1: 8, 2: 6, 3: 4, 4: 1.5, 5: 1}).fillna(1)
-    base = LGBMClassifier(objective="multiclass", num_class=5, n_estimators=250, learning_rate=0.05, random_state=42, n_jobs=-1)
-    base.fit(add_features(train), train[TARGET], sample_weight=weights)
+    if LGBMClassifier is not None:
+        base = LGBMClassifier(objective="multiclass", num_class=5, n_estimators=250, learning_rate=0.05, random_state=42, n_jobs=-1)
+        base.fit(add_features(train), train[TARGET], sample_weight=weights)
+        model_name = "LightGBM"
+    else:
+        base = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("classifier", LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")),
+        ])
+        base.fit(add_features(train), train[TARGET])
+        model_name = "LogisticRegression"
     # scikit-learn 1.6+ replaces cv="prefit" with FrozenEstimator. The sites are
     # deliberately disjoint: train sites 1-4, calibration site 5, test site 6.
     calibrated = CalibratedClassifierCV(FrozenEstimator(base), method="isotonic")
@@ -100,10 +118,10 @@ def main() -> None:
     report["fast_track_false_negative_count"] = int((candidates & urgent).sum())
     report["fast_track_validation_status"] = "eligible for governance review" if report["fast_track_false_negative_count"] == 0 else "must remain disabled"
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    version = f"lgbm-site-split-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    joblib.dump({"model": calibrated, "base_model": base, "metadata": {"model_version": version, "features": FEATURES, "training_sites": [1, 2, 3, 4], "calibration_site": 5, "test_site": 6}}, args.out_dir / "triage_calibrated.joblib")
+    version = f"{model_name.lower()}-site-split-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    joblib.dump({"model": calibrated, "base_model": base, "metadata": {"model_name": model_name, "model_version": version, "features": FEATURES, "training_sites": [1, 2, 3, 4], "calibration_site": 5, "test_site": 6, "fast_track_validation_status": report["fast_track_validation_status"]}}, args.out_dir / "triage_calibrated.joblib")
     (args.out_dir / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    (args.out_dir / "model_metadata.json").write_text(json.dumps({"model_version": version, "status": "Trained locally", "training_rows": len(train), "calibration_rows": len(calibration), "test_rows": len(test), "pediatric_records_used": 0, "fast_track_validation_status": report["fast_track_validation_status"]}, indent=2), encoding="utf-8")
+    (args.out_dir / "model_metadata.json").write_text(json.dumps({"model_name": model_name, "model_version": version, "status": "Trained locally", "training_rows": len(train), "calibration_rows": len(calibration), "test_rows": len(test), "pediatric_records_used": 0, "fast_track_validation_status": report["fast_track_validation_status"]}, indent=2), encoding="utf-8")
     print(f"Wrote local model and evaluation report to {args.out_dir}")
 
 

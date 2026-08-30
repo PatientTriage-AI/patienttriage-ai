@@ -1,6 +1,6 @@
 {
   "model_name": "LogisticRegression",
-  "model_version": "logisticregression-site-split-20260830T124917Z",
+  "model_version": "logisticregression-site-split-20260830T140232Z",
   "status": "Trained locally",
   "training_rows": 61927,
   "calibration_rows": 12892,

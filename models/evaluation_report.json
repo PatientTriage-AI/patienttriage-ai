@@ -1,7 +1,4 @@
 {
-  "accuracy": 0.8673378977043898,
-  "macro_f1": 0.6608110056182331,
-  "esi_5_recall": 0.0,
   "confusion_matrix": {
     "labels": [
       1,
