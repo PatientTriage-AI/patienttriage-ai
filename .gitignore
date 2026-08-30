@@ -1,15 +1,16 @@
-__pycache__/
-*.py[cod]
 .venv/
-.streamlit/
-data/raw/
-data/processed/
-models/*.joblib
-models/*.pkl
-runtime/
-*.sqlite3
-.DS_Store
+venv/
+__pycache__/
+*.pyc
 .pytest_cache/
-.ruff_cache/
+.DS_Store
+*.sqlite3
+runtime/
+models/*.joblib
+models/*.json
+Data_preProcessing/
+*.csv
+*.xlsx
+.env
 
 *.egg-info/

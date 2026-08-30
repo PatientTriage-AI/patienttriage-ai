@@ -1,231 +1,274 @@
-from __future__ import annotations
-
-import uuid
-from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
 import streamlit as st
+import pandas as pd
+import json
+import uuid
+import io
+from pathlib import Path
+from datetime import datetime, timezone
 
-from patienttriage.audit import AuditStore
-from patienttriage.domain import DecisionPayload, IntakePayload, VitalsPayload
-from patienttriage.ehr import LocalMockEhrAdapter
-from patienttriage.fixtures import nurse_facing_scenarios
-from patienttriage.model import model_metadata
-from patienttriage.policy import load_policy
-from patienttriage.queue import QueuePatient, deterioration_alert, sorted_queue, wait_limit_alert
-from patienttriage.service import evaluate_intake
+from patienttriage.domain import IntakePayload, DecisionPayload, VitalsPayload, ReassessmentEvent
+from patienttriage.policy import SafetyPolicy
+from patienttriage.model import TriageModel
+from patienttriage.audit import AuditTrail
+from patienttriage.service import TriageService
+from patienttriage.queue import PatientQueue
+from patienttriage.ehr import EhrAdapter
 
-st.set_page_config(page_title="PatientTriage.ai | Round 2", page_icon="🩺", layout="wide")
-st.markdown("""
-<style>
-    div[data-testid="stMetric"] { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 14px; }
-    div[data-testid="stMetricLabel"] { color: #cbd5e1; }
-    .demo-step { padding: .65rem .8rem; border-radius: .5rem; background: #172033; margin: .35rem 0; }
-</style>
-""", unsafe_allow_html=True)
-st.error("CLINICAL DECISION SUPPORT ONLY - nurse confirmation required - not for production use.")
-policy = load_policy()
-store = AuditStore()
-PAGES = ["New arrival", "Recommendation", "Nurse decision", "Waiting queue", "Audit & model card"]
+st.set_page_config(page_title="PatientTriage.ai", layout="wide", initial_sidebar_state="expanded")
+
+# --- INITIALIZATION ---
+@st.cache_resource
+def init_services():
+    base_dir = Path(__file__).parent
+    policy = SafetyPolicy(base_dir / "config" / "policy.v1.json")
+    model = TriageModel(base_dir / "models")
+    audit = AuditTrail(base_dir / "runtime" / "audit.sqlite3")
+    # Ensure runtime dir exists
+    (base_dir / "runtime").mkdir(exist_ok=True)
+    service = TriageService(policy, model, audit)
+    return service, policy
 
 if "queue" not in st.session_state:
-    st.session_state.queue = []
-if "assessment" not in st.session_state:
-    st.session_state.assessment = None
-if "intake" not in st.session_state:
-    st.session_state.intake = None
-if "active_screen" not in st.session_state:
-    st.session_state.active_screen = "New arrival"
-if "decision_tokens" not in st.session_state:
-    st.session_state.decision_tokens = set()
-if st.session_state.get("next_screen"):
-    st.session_state.active_screen = st.session_state.pop("next_screen")
+    st.session_state.queue = PatientQueue()
+if "ehr" not in st.session_state:
+    st.session_state.ehr = EhrAdapter()
+if "simulate_ml_failure" not in st.session_state:
+    st.session_state.simulate_ml_failure = False
+if "surge_multiplier" not in st.session_state:
+    st.session_state.surge_multiplier = 1
 
-st.sidebar.title("PatientTriage.ai")
-screen = st.sidebar.radio("Screen", PAGES, key="active_screen")
-model_failure = st.sidebar.toggle("Demonstrate model failure", help="Safe rules-only fallback; no ML score is displayed.")
-surge = st.sidebar.toggle("3x surge display", help="Shows capacity pressure only; safety gates and order never change.")
-with st.sidebar.expander("Guided demo", expanded=False):
-    st.markdown("""
-    <div class="demo-step">1. Select a scenario and evaluate intake.</div>
-    <div class="demo-step">2. Review the recommendation and safety gate.</div>
-    <div class="demo-step">3. Record a nurse-confirmed disposition.</div>
-    <div class="demo-step">4. Explore queue, surge, and audit events.</div>
-    """, unsafe_allow_html=True)
+service, policy_config = init_services()
 
+# --- CSS / STYLING ---
+st.markdown("""
+<style>
+    .safety-banner {
+        background-color: #ff4b4b;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 20px;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 8px;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-def go_to(page: str) -> None:
-    """Navigate on a fresh rerun, before Streamlit constructs the sidebar radio widget."""
-    st.session_state.next_screen = page
-    st.rerun()
+st.markdown('<div class="safety-banner">CLINICAL DECISION SUPPORT ONLY | NURSE CONFIRMATION REQUIRED | NOT FOR PRODUCTION USE</div>', unsafe_allow_html=True)
 
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("Settings & Simulation")
+    st.session_state.simulate_ml_failure = st.toggle("Simulate ML Failure", value=st.session_state.simulate_ml_failure)
+    
+    surge = st.radio("Operating Mode", ["1x (Normal)", "3x (Surge)"])
+    st.session_state.surge_multiplier = 3 if "3x" in surge else 1
+    if st.session_state.surge_multiplier == 3:
+        st.warning("⚠️ Surge mode changes operational pressure only. Safety thresholds remain unchanged.")
+        
+    st.markdown("---")
+    st.info(f"Policy: {policy_config.version()}")
+    st.info(f"Model: {service.model.metadata.get('model_version', 'None') if service.model.is_available() else 'None'}")
 
-def optional_number(label: str, default: float | None, minimum: float = 0.0, maximum: float = 300.0) -> float | None:
-    missing_key = f"missing-{label}"
-    if missing_key not in st.session_state:
-        st.session_state[missing_key] = default is None
-    marked = st.checkbox(f"{label} not available", key=missing_key)
-    if marked:
-        return None
-    value_key = f"value-{label}"
-    if value_key not in st.session_state:
-        st.session_state[value_key] = float(default if default is not None else minimum)
-    return st.number_input(label, min_value=float(minimum), max_value=float(maximum), key=value_key)
+# --- TABS ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["New Arrival", "Batch Intake", "Waiting Queue", "Audit Trail", "Model Evaluation"])
 
-
-if screen == "New arrival":
-    st.header("1. New arrival")
-    st.caption("Use a non-identifying demo scenario, or enter current intake observations manually.")
-    scenarios = nurse_facing_scenarios()
-    choices = {"Manual entry": None, **{row["label"]: row for row in scenarios}}
-    quick_choices = [
-        "SIMULATED: zero-history intake",
-        "SIMULATED: pediatric rules-only escalation",
-        "SIMULATED: ambiguous presentation",
-    ]
-    quick_columns = st.columns(3)
-    for column, option in zip(quick_columns, quick_choices):
-        if column.button(option.replace("SIMULATED: ", "Try: "), use_container_width=True):
-            st.session_state.pending_scenario = option
-            st.rerun()
-    if st.session_state.get("pending_scenario"):
-        st.session_state.scenario_choice = st.session_state.pop("pending_scenario")
-    selected_label = st.selectbox("Demo scenario (expected ESI is hidden from this screen)", list(choices), key="scenario_choice")
-    selected = choices[selected_label] or {}
-    numeric_fields = [
-        ("Age", "age"), ("Systolic BP", "systolic_bp"), ("Diastolic BP", "diastolic_bp"),
-        ("Heart rate", "heart_rate"), ("Respiratory rate", "respiratory_rate"),
-        ("Temperature C", "temperature_c"), ("SpO2", "spo2"), ("Pain score", "pain_score"),
-    ]
-    # A scenario selection is a deliberate new intake: reset prior manual checkbox/widget values
-    # before constructing form widgets, otherwise Streamlit preserves stale widget state.
-    if st.session_state.get("loaded_scenario") != selected_label:
-        st.session_state.loaded_scenario = selected_label
-        for label, field in numeric_fields:
-            value = selected.get(field)
-            st.session_state[f"missing-{label}"] = value is None
-            if value is not None:
-                st.session_state[f"value-{label}"] = float(value)
-    with st.form("intake_form"):
-        token = st.text_input("Pseudonymous patient token", value=selected.get("id", f"demo-{uuid.uuid4().hex[:8]}"))
+# --- TAB 1: NEW ARRIVAL (SINGLE) ---
+with tab1:
+    st.header("Single Patient Intake")
+    
+    with st.form("single_intake_form"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            age = optional_number("Age", selected.get("age"), 0, 120)
-            systolic = optional_number("Systolic BP", selected.get("systolic_bp"), 0, 300)
-            diastolic = optional_number("Diastolic BP", selected.get("diastolic_bp"), 0, 250)
+            age = st.number_input("Age", min_value=0, max_value=120, value=45)
+            sex = st.selectbox("Sex", ["M", "F", "Other"])
+            history = st.checkbox("History Available", value=True)
+            complaint = st.text_input("Chief Complaint")
         with col2:
-            heart_rate = optional_number("Heart rate", selected.get("heart_rate"), 0, 300)
-            respiratory = optional_number("Respiratory rate", selected.get("respiratory_rate"), 0, 100)
-            temperature = optional_number("Temperature C", selected.get("temperature_c"), 0, 50)
+            sys_bp = st.number_input("Systolic BP", min_value=0, value=120)
+            dia_bp = st.number_input("Diastolic BP", min_value=0, value=80)
+            hr = st.number_input("Heart Rate", min_value=0, value=80)
+            rr = st.number_input("Resp Rate", min_value=0, value=16)
         with col3:
-            spo2 = optional_number("SpO2", selected.get("spo2"), 0, 100)
-            pain = optional_number("Pain score", selected.get("pain_score"), 0, 10)
-            sex = st.selectbox("Sex (context only)", ["Not recorded", "Female", "Male", "Intersex / self-described"])
-        history = st.checkbox("History available", value=False)
-        complaint = st.text_area("Chief complaint (context only; never used for ML or red-flag matching)")
-        cues = st.multiselect("Nurse-observed red flags", policy["nurse_selectable_red_flags"], default=selected.get("observable_cues", []))
-        submitted = st.form_submit_button("Evaluate intake")
-    if submitted:
-        payload = IntakePayload(token, age, systolic, diastolic, heart_rate, respiratory, temperature, spo2, pain, sex, complaint, history, tuple(cues))
-        assessment = evaluate_intake(payload, model_failure=model_failure)
-        st.session_state.intake, st.session_state.assessment = payload, assessment
-        store.record_assessment(payload, assessment)
-        st.success("Assessment recorded locally.")
-    if st.session_state.assessment and st.session_state.intake:
-        if st.button("View recommendation →", type="primary"):
-            go_to("Recommendation")
-
-elif screen == "Recommendation":
-    st.header("2. Recommendation")
-    assessment = st.session_state.assessment
-    if not assessment:
-        st.info("Complete a New arrival assessment first.")
-    else:
-        st.subheader(assessment.recommendation)
-        st.caption(f"Safety gate: {assessment.safety_gate} | rules: {assessment.rule_version} | model: {assessment.model_version}")
-        cols = st.columns(4)
-        cols[0].metric("Suggested ESI", assessment.suggested_esi if assessment.suggested_esi else "-" )
-        cols[1].metric("Calibrated confidence", f"{assessment.confidence:.0%}" if assessment.confidence is not None else "Unavailable")
-        cols[2].metric("Urgent risk", f"{assessment.urgent_risk:.0%}" if assessment.urgent_risk is not None else "Unavailable")
-        cols[3].metric("Fast-Track", "Eligible" if assessment.fast_track_eligible else "Not eligible")
-        if assessment.missing_fields: st.warning("Missing: " + ", ".join(assessment.missing_fields))
-        if assessment.implausible_fields: st.warning("Verify: " + ", ".join(assessment.implausible_fields))
-        if assessment.red_flags: st.error("Red flags: " + ", ".join(assessment.red_flags))
-        if assessment.top_factors: st.write("Top model factors: " + "; ".join(assessment.top_factors))
-        st.info("Why not Fast-Track: " + "; ".join(assessment.why_not_fast_track))
-        if st.button("Record nurse decision →", type="primary"):
-            go_to("Nurse decision")
-
-elif screen == "Nurse decision":
-    st.header("3. Nurse decision")
-    assessment, intake = st.session_state.assessment, st.session_state.intake
-    if not assessment or not intake:
-        st.info("Complete an assessment first.")
-    else:
-        dispositions = ["ESI 1", "ESI 2", "ESI 3", "ESI 4", "ESI 5", "Clinician review required"]
-        default_disposition = f"ESI {assessment.suggested_esi}" if assessment.suggested_esi else "Clinician review required"
-        with st.form("decision"):
-            accepted = st.radio("Decision", ["Accept recommendation", "Override recommendation"]) == "Accept recommendation"
-            disposition = st.selectbox("Final nurse disposition", dispositions, index=dispositions.index(default_disposition))
-            reason = st.selectbox("Override reason", ["", "New clinical information", "Clinical judgement", "Patient deterioration", "Data correction", "Other"])
-            note = st.text_area("Optional note")
-            submit = st.form_submit_button("Record nurse decision")
-        if submit:
-            if not accepted and not reason:
-                st.error("Select a structured override reason.")
-            elif intake.patient_token in st.session_state.decision_tokens:
-                st.warning("This intake already has a recorded nurse decision. Start a new arrival to record another case.")
+            temp = st.number_input("Temperature (°C)", min_value=20.0, max_value=45.0, value=37.0)
+            spo2 = st.number_input("SpO2 (%)", min_value=0, max_value=100, value=98)
+            pain = st.number_input("Pain Score", min_value=0, max_value=10, value=0)
+            
+        st.markdown("#### Red Flags & Cues")
+        red_flags = st.multiselect("Select Red Flags if present", policy_config.config["red_flags"])
+        
+        submitted = st.form_submit_button("Assess Patient")
+        
+        if submitted:
+            intake = IntakePayload(
+                age=age, sex=sex, systolic_bp=sys_bp, diastolic_bp=dia_bp,
+                heart_rate=hr, respiratory_rate=rr, temperature=temp,
+                spo2=spo2, pain_score=pain, history_available=history,
+                complaint=complaint, observable_cues=[], red_flags=red_flags
+            )
+            assessment = service.evaluate_intake(intake, simulate_ml_failure=st.session_state.simulate_ml_failure)
+            
+            # Show Assessment Results
+            st.markdown("### Assessment Result")
+            if not assessment.safety_gate_passed:
+                st.error(f"CLINICIAN REVIEW REQUIRED: {assessment.clinician_review_reason}")
+                if assessment.is_pediatric:
+                    st.warning("PEDIATRIC CASE - Adult ML model unavailable. Rules-only escalation.")
             else:
-                decision = DecisionPayload(intake.patient_token, disposition, accepted, reason or None, note or None)
-                store.record_decision(decision, assessment)
-                LocalMockEhrAdapter().write_disposition(intake.patient_token, disposition, {"prototype": True, "audit_required": True})
-                esi = int(disposition[-1]) if disposition.startswith("ESI") else None
-                st.session_state.queue.append(QueuePatient(intake.patient_token, intake.entered_at, esi, assessment))
-                st.session_state.decision_tokens.add(intake.patient_token)
-                st.success("Immutable audit event recorded and local mock EHR disposition written.")
-        if intake.patient_token in st.session_state.decision_tokens:
-            if st.button("Open waiting queue →", type="primary"):
-                go_to("Waiting queue")
+                st.success("Safety Gate: PASSED")
+                
+            colA, colB, colC = st.columns(3)
+            colA.metric("Suggested ESI", assessment.suggested_esi if assessment.suggested_esi else "N/A")
+            colB.metric("Confidence", f"{assessment.confidence:.1%}" if assessment.confidence else "N/A")
+            colC.metric("Urgent Risk", f"{assessment.urgent_risk:.1%}" if assessment.urgent_risk else "N/A")
+            
+            if assessment.fast_track_eligible:
+                st.success("Fast-Track: ELIGIBLE")
+            else:
+                st.warning(f"Fast-Track: NOT ELIGIBLE ({assessment.fast_track_reason})")
+                
+            if assessment.shap_factors:
+                st.markdown("#### Model explanation — not clinical reasoning")
+                for f in assessment.shap_factors:
+                    st.write(f"- {f['direction']} **{f['feature']}**: {f['value']}")
+                    
+            st.session_state.queue.add_patient(assessment, intake)
+            st.info("Patient added to waiting queue for final disposition.")
 
-elif screen == "Waiting queue":
-    st.header("4. Waiting queue")
-    queue = sorted_queue(st.session_state.queue)
-    display = queue * 3 if surge else queue
-    st.caption("3x surge increases displayed volume and capacity pressure only; it does not relax thresholds or reorder urgency.")
-    if not display:
-        st.info("No nurse-confirmed queue entries yet.")
-    for sequence, person in enumerate(display, start=1):
-        alert = wait_limit_alert(person, policy)
-        with st.container(border=True):
-            label = f"Surge simulation {sequence}: " if surge else ""
-            st.write(f"**{label}{person.patient_token}** - {('ESI ' + str(person.final_esi)) if person.final_esi else 'Awaiting disposition'} - {person.elapsed_minutes()} min")
-            if alert: st.warning(alert)
-    st.divider()
-    st.subheader("Record reassessment vitals")
-    token = st.selectbox("Queue patient", [p.patient_token for p in queue], index=None)
-    if token:
-        person = next(p for p in queue if p.patient_token == token)
-        if st.button("Apply simulated deterioration vitals"):
-            payload = IntakePayload(token, 64, 98, 60, 142, 30, 37.9, 90, 8)
-            latest = evaluate_intake(payload, model_failure=model_failure)
-            latest_vitals = VitalsPayload(token, 98, 60, 142, 30, 37.9, 90, 8)
-            store.record_vitals(latest_vitals)
-            alert = deterioration_alert(person.final_esi, latest)
-            if alert:
-                person.reassessment_alerts.append(alert)
-                st.error(alert)
+# --- TAB 2: BATCH INTAKE ---
+with tab2:
+    st.header("Batch Patient Intake")
+    st.write("Interface mein multiple patients ki information ek saath enter honi chahiye — Excel sheet ya CSV file se input le lo.")
+    
+    colA, colB = st.columns(2)
+    with colA:
+        csv_template = "age,sex,systolic_bp,diastolic_bp,heart_rate,respiratory_rate,temperature,spo2,pain_score,history_available,complaint\n45,M,120,80,80,16,37.0,98,0,True,Chest pain"
+        st.download_button("Download CSV Template", csv_template, "template.csv", "text/csv")
+        
+    uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+                
+            st.write(f"Loaded {len(df)} records.")
+            
+            if st.button("Process Batch"):
+                valid_count = 0
+                invalid_count = 0
+                
+                for _, row in df.iterrows():
+                    try:
+                        intake = IntakePayload(
+                            age=int(row.get('age', 45)),
+                            sex=str(row.get('sex', 'M')),
+                            systolic_bp=float(row.get('systolic_bp', 120)) if pd.notna(row.get('systolic_bp')) else None,
+                            diastolic_bp=float(row.get('diastolic_bp', 80)) if pd.notna(row.get('diastolic_bp')) else None,
+                            heart_rate=float(row.get('heart_rate', 80)) if pd.notna(row.get('heart_rate')) else None,
+                            respiratory_rate=float(row.get('respiratory_rate', 16)) if pd.notna(row.get('respiratory_rate')) else None,
+                            temperature=float(row.get('temperature', 37.0)) if pd.notna(row.get('temperature')) else None,
+                            spo2=float(row.get('spo2', 98)) if pd.notna(row.get('spo2')) else None,
+                            pain_score=float(row.get('pain_score', 0)) if pd.notna(row.get('pain_score')) else None,
+                            history_available=bool(row.get('history_available', True)),
+                            complaint=str(row.get('complaint', '')),
+                            observable_cues=[],
+                            red_flags=[]
+                        )
+                        assessment = service.evaluate_intake(intake, simulate_ml_failure=st.session_state.simulate_ml_failure)
+                        st.session_state.queue.add_patient(assessment, intake)
+                        valid_count += 1
+                    except Exception as e:
+                        invalid_count += 1
+                        
+                st.success(f"Processed {valid_count} valid patients. {invalid_count} errors.")
+        except Exception as e:
+            st.error(f"Error parsing file: {e}")
 
-else:
-    st.header("5. Audit & model card")
-    st.caption("Local SQLite append-only audit trail. Expected ESI fixture labels are not shown in the nurse workflow.")
-    query = st.text_input("Search local audit timeline")
-    valid, message = store.verify_chain()
-    (st.success if valid else st.error)(message)
-    for event in store.timeline(query):
-        with st.expander(f"#{event['sequence']} | {event['event_type']} | {event['patient_token']} | {event['created_at']}"):
-            st.json(event["payload"])
-    st.subheader("Model status")
-    st.json(model_metadata())
-    st.markdown("See `docs/MODEL_CARD.md` for limitations, intended use, evaluation requirements, privacy, and fairness reporting.")
+# --- TAB 3: WAITING QUEUE ---
+with tab3:
+    st.header("Waiting Queue")
+    
+    st.session_state.queue.check_reassessments(policy_config.config)
+    q = st.session_state.queue.get_queue(st.session_state.surge_multiplier)
+    
+    if st.session_state.surge_multiplier == 3:
+        st.metric("Displayed Queue Volume (Surge)", len(q) * 3)
+    else:
+        st.metric("Displayed Queue Volume", len(q))
+        
+    for item in q:
+        with st.expander(f"{item['token']} | Urgency: {item['final_esi']} | Wait: {(datetime.now(timezone.utc) - item['added_at']).seconds // 60}m"):
+            st.write(f"**Status:** {item['disposition']}")
+            if item['reassessment_needed']:
+                st.error(f"⚠️ REASSESSMENT REQUIRED: {item['reassessment_reason']}")
+                
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Intake Details**")
+                st.json(item['intake'].__dict__)
+            with col2:
+                st.write("**Assessment**")
+                st.write(f"Suggested ESI: {item['assessment'].suggested_esi}")
+                st.write(f"Confidence: {item['assessment'].confidence}")
+                
+                new_esi = st.selectbox("Final Disposition", [1, 2, 3, 4, 5, "Fast-Track", "Discharge"], key=f"disp_{item['token']}")
+                override_reason = st.text_input("Override Reason (if applicable)", key=f"rsn_{item['token']}")
+                
+                if st.button("Confirm Decision", key=f"btn_{item['token']}"):
+                    decision = DecisionPayload(
+                        patient_token=item['token'],
+                        nurse_accepted=str(new_esi) == str(item['assessment'].suggested_esi),
+                        override_esi=int(new_esi) if str(new_esi).isdigit() else None,
+                        override_reason=override_reason if str(new_esi) != str(item['assessment'].suggested_esi) else None,
+                        override_text=""
+                    )
+                    service.record_decision(decision)
+                    item['disposition'] = "Processed"
+                    item['final_esi'] = decision.override_esi or item['assessment'].suggested_esi
+                    st.success("Decision recorded.")
+                    st.rerun()
+
+# --- TAB 4: AUDIT TRAIL ---
+with tab4:
+    st.header("Audit Trail")
+    events = service.audit.get_events()
+    if events:
+        df_events = pd.DataFrame(events)
+        st.dataframe(df_events, use_container_width=True)
+    else:
+        st.write("No events recorded yet.")
+
+# --- TAB 5: MODEL EVALUATION ---
+with tab5:
+    st.header("Model Evaluation Dashboard")
+    try:
+        report_path = Path(__file__).parent / "models" / "evaluation_report.json"
+        if report_path.exists():
+            with open(report_path) as f:
+                report = json.load(f)
+                
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Overall Accuracy", f"{report.get('accuracy', 0):.1%}")
+            col2.metric("Urgent Case Recall", f"{report.get('urgent_case_recall', 0):.1%}")
+            col3.metric("Low Acuity Precision", f"{report.get('low_acuity_precision', 0):.1%}")
+            col4.metric("ESI 5 Recall", f"{report.get('esi_5_recall', 0):.1%}")
+            
+            st.write(f"Fast-Track False Negatives: **{report.get('fast_track_false_negative_count')}**")
+            st.write(f"Fast-Track Validation Status: **{report.get('fast_track_validation_status')}**")
+            
+            st.subheader("Confusion Matrix")
+            st.write(pd.DataFrame(report["confusion_matrix"]["values"], 
+                                  columns=[f"Pred ESI {i}" for i in report["confusion_matrix"]["labels"]],
+                                  index=[f"Actual ESI {i}" for i in report["confusion_matrix"]["labels"]]))
+        else:
+            st.warning("Evaluation report not found. Run model training script.")
+    except Exception as e:
+        st.error(f"Failed to load report: {e}")
