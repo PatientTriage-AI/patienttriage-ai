@@ -238,13 +238,56 @@ with tab3:
 
 # --- TAB 4: AUDIT TRAIL ---
 with tab4:
-    st.header("Audit Trail")
+    # Initialise confirmation flag in session state.
+    if "confirm_clear_audit" not in st.session_state:
+        st.session_state.confirm_clear_audit = False
+
+    # Header row: title on the left, Clear button on the right.
+    hdr_col, btn_col = st.columns([6, 1])
+    with hdr_col:
+        st.header("Audit Trail")
+    with btn_col:
+        st.write("")  # vertical spacer so button aligns with header
+        if st.button("🗑️ Clear Audit Trail", key="open_clear_audit"):
+            st.session_state.confirm_clear_audit = True
+
+    # Two-step confirmation panel.
+    if st.session_state.confirm_clear_audit:
+        st.warning(
+            "**Clear Audit Trail?**\n\n"
+            "This will permanently remove all locally stored audit events from "
+            "the current audit database. This action cannot be undone."
+        )
+        confirm_col, cancel_col, _ = st.columns([2, 2, 6])
+        with confirm_col:
+            if st.button("✅ Clear Audit Trail", key="confirm_clear_audit_btn", type="primary"):
+                try:
+                    service.audit.clear_audit_trail()
+                    st.session_state.confirm_clear_audit = False
+                    st.success("Audit trail cleared successfully.")
+                except Exception as exc:
+                    st.error(
+                        "Unable to clear audit trail. "
+                        "Please check the local audit database."
+                    )
+                    import logging
+                    logging.getLogger(__name__).error("Audit clear failed: %s", exc)
+        with cancel_col:
+            if st.button("Cancel", key="cancel_clear_audit_btn"):
+                st.session_state.confirm_clear_audit = False
+                st.rerun()
+
+    # Event display.
     events = service.audit.get_events()
     if events:
         df_events = pd.DataFrame(events)
         st.dataframe(df_events, use_container_width=True)
     else:
-        st.write("No events recorded yet.")
+        st.info(
+            "**No audit events are currently stored.**\n\n"
+            "New patient assessments and decisions will appear here automatically."
+        )
+
 
 # --- TAB 5: MODEL EVALUATION ---
 with tab5:
