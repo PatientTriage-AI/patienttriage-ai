@@ -76,3 +76,29 @@ class AuditTrail:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("SELECT * FROM audit_events ORDER BY id DESC")
             return [dict(r) for r in cursor.fetchall()]
+
+    def clear_audit_trail(self) -> None:
+        """Delete all persisted audit events and reset the hash chain.
+
+        After this call:
+        - The ``audit_events`` table is empty (persistent clear — survives refresh).
+        - ``self.last_hash`` is reset to ``"GENESIS"`` so future events start a
+          new valid hash chain without any errors.
+
+        Raises:
+            Exception: Re-raises any SQLite error so callers can surface it to
+                       the user without silently swallowing failures.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM audit_events")
+            try:
+                conn.execute("DELETE FROM sqlite_sequence WHERE name='audit_events'")
+            except sqlite3.OperationalError:
+                pass  # sqlite_sequence may not exist if table was never populated
+        # Reset in-memory chain head so the next recorded event is valid.
+        self.last_hash = "GENESIS"
+
+    # Backward-compatible alias kept for any existing callers.
+    def clear_all(self) -> None:
+        """Alias for :meth:`clear_audit_trail` kept for backward compatibility."""
+        self.clear_audit_trail()
