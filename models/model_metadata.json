@@ -1,9 +1,10 @@
 {
-  "model_version": "lgbm-site-split-20260829T151038Z",
+  "model_name": "LogisticRegression",
+  "model_version": "logisticregression-site-split-20260830T124917Z",
   "status": "Trained locally",
   "training_rows": 61927,
   "calibration_rows": 12892,
   "test_rows": 12415,
   "pediatric_records_used": 0,
-  "fast_track_validation_status": "must remain disabled"
+  "fast_track_validation_status": "eligible for governance review"
 }

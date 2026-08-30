@@ -1,76 +1,65 @@
-from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Literal
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass(frozen=True)
+@dataclass
 class IntakePayload:
-    patient_token: str
-    age: float | None
-    systolic_bp: float | None
-    diastolic_bp: float | None
-    heart_rate: float | None
-    respiratory_rate: float | None
-    temperature_c: float | None
-    spo2: float | None
-    pain_score: float | None
-    sex: str = "Not recorded"  # Context only - never passed to the ML model.
-    complaint: str = ""  # Context only - never parsed for red flags or ML features.
-    history_available: bool = False
-    observable_cues: tuple[str, ...] = ()  # Nurse-selected, versioned policy cues.
-    entered_at: str = field(default_factory=utc_now)
+    age: int
+    sex: str
+    systolic_bp: Optional[float]
+    diastolic_bp: Optional[float]
+    heart_rate: Optional[float]
+    respiratory_rate: Optional[float]
+    temperature: Optional[float]
+    spo2: Optional[float]
+    pain_score: Optional[float]
+    history_available: bool
+    complaint: str
+    observable_cues: List[str]
+    red_flags: List[str]
 
-    def snapshot(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
+@dataclass
 class TriageAssessment:
-    status: Literal["assessment", "clinician_review_required", "rules_only"]
-    recommendation: str
-    suggested_esi: int | None
-    confidence: float | None
-    urgent_risk: float | None
-    low_acuity_probability: float | None
-    safety_gate: str
+    patient_token: str
+    timestamp: datetime
+    is_pediatric: bool
+    safety_gate_passed: bool
+    missing_fields: List[str]
+    red_flags: List[str]
+    suggested_esi: Optional[int]
+    confidence: Optional[float]
+    urgent_risk: Optional[float]
+    probabilities: Optional[Dict[int, float]]
+    shap_factors: Optional[List[Dict[str, Any]]]
     fast_track_eligible: bool
-    why_not_fast_track: tuple[str, ...]
-    missing_fields: tuple[str, ...]
-    implausible_fields: tuple[str, ...]
-    red_flags: tuple[str, ...]
-    top_factors: tuple[str, ...]
+    fast_track_reason: str
+    clinician_review_reason: Optional[str]
     model_version: str
-    rule_version: str
-    out_of_distribution: bool = False
-
-    def snapshot(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
+    policy_version: str
+    
+@dataclass
 class DecisionPayload:
     patient_token: str
-    nurse_disposition: str
-    accepted: bool
-    override_reason: str | None = None
-    override_note: str | None = None
-    decided_at: str = field(default_factory=utc_now)
+    nurse_accepted: bool
+    override_esi: Optional[int]
+    override_reason: Optional[str]
+    override_text: Optional[str]
 
-
-@dataclass(frozen=True)
+@dataclass
 class VitalsPayload:
+    systolic_bp: Optional[float]
+    diastolic_bp: Optional[float]
+    heart_rate: Optional[float]
+    respiratory_rate: Optional[float]
+    temperature: Optional[float]
+    spo2: Optional[float]
+    pain_score: Optional[float]
+    red_flags: List[str]
+@dataclass
+class ReassessmentEvent:
     patient_token: str
-    systolic_bp: float | None
-    diastolic_bp: float | None
-    heart_rate: float | None
-    respiratory_rate: float | None
-    temperature_c: float | None
-    spo2: float | None
-    pain_score: float | None
-    recorded_at: str = field(default_factory=utc_now)
+    timestamp: datetime
+    trigger: str
+    old_esi: Optional[int]
+    new_esi: Optional[int]
+    vitals_updated: bool
