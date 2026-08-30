@@ -1,0 +1,42 @@
+{
+  "version": "1.0.0",
+  "name": "Safety Policy v1",
+  "thresholds": {
+    "pediatric_age_limit": 18,
+    "fast_track_max_urgent_risk": 0.15,
+    "reassessment_wait_limit_minutes": {
+      "1": 0,
+      "2": 15,
+      "3": 60,
+      "4": 120,
+      "5": 120
+    }
+  },
+  "required_vitals": [
+    "systolic_bp",
+    "diastolic_bp",
+    "heart_rate",
+    "respiratory_rate",
+    "temperature",
+    "spo2"
+  ],
+  "plausible_ranges": {
+    "systolic_bp": [30, 250],
+    "diastolic_bp": [20, 150],
+    "heart_rate": [20, 250],
+    "respiratory_rate": [4, 60],
+    "temperature": [30.0, 42.0],
+    "spo2": [50, 100],
+    "pain_score": [0, 10]
+  },
+  "red_flags": [
+    "Airway compromise",
+    "Severe respiratory distress",
+    "Cardiac arrest",
+    "Unresponsive",
+    "Stroke symptoms",
+    "Severe hemorrhage",
+    "Immediate trauma risk",
+    "Lethargy or confusion"
+  ]
+}
